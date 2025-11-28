@@ -1,0 +1,27 @@
+site_name: AviaraConnect API Documentation
+site_description: AI-powered agentic platform for contract review and invoice validation
+site_author: Aviara Labs
+site_url: https://aviaralabs.com
+
+docs_dir: docs
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: assets/logo.png
+  palette:
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+extra_css:
+  - stylesheets/custom-palette.css
