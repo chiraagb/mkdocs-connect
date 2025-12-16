@@ -1,258 +1,151 @@
-# Template Upload with SSE - Included details required for frontend Integration
+# Template Upload - Included details required for frontend Integration
 
-This document explains how the frontend should integrate with the **Template Upload API** that supports:
+## API Overview
 
-- File upload
-- Duplicate detection
-- Background processing (Celery)
-- Real-time progress updates using **Server-Sent Events (SSE)**
-
----
-
-## Overview
-
-The upload flow works in **two phases**:
-
-1. **Upload API call**
-
-   - Validates input
-   - Performs duplicate check
-   - Starts background processing
-   - Returns a `task_id`
-
-2. **SSE connection (optional but recommended)**
-   - Streams real-time progress
-   - Automatically closes on completion or error
-
-> ⚠️ SSE is **read-only** and **one-way** (server → client).
+| Purpose             | Endpoint                                                      | Method |
+| ------------------- | ------------------------------------------------------------- | ------ |
+| Upload a template   | `/api/v1/drafting/contract/template/upload/`                  | `POST` |
+| Track upload status | `/api/v1/drafting/contract/template/upload/status/{task_id}/` | `GET`  |
 
 ---
 
-## API Endpoints
+## 1. Upload Template (Async)
 
-### Upload Template
+### Endpoint
 
-**POST**
+`POST /api/v1/drafting/contract/template/upload/`
 
-```
+### Purpose
 
-/api/v1/drafting/contract/template/upload/
+Upload a contract template file and start asynchronous processing.
 
-```
+### What Happens Internally
 
-**Headers**
+- File is validated - pdf only
+- Duplicate file check is performed
+- Background task starts:
 
-```
+  - Variable extraction
+  - HTML processing
+  - File upload to storage
+  - Database insertion
 
-Authorization: Bearer <JWT_TOKEN>
+### Required Inputs
 
-```
+- Template metadata:
 
-**Body (multipart/form-data)**
+  - Name
+  - Type (e.g., Sale Agreement, Lease Agreement, etc.)
+  - Description
 
-| Field       | Type   | Required |
-| ----------- | ------ | -------- |
-| name        | string | ✅       |
-| type        | string | ✅       |
-| description | string | ❌       |
-| files       | file   | ✅       |
+- File: Only one file per request is supported
 
----
+### Success Response (Upload Started)
 
-### Success Response (Non-blocking)
+- HTTP **202 Accepted**
+- Returns:
 
-```json
-{
-  "message": "Template upload started",
-  "task_id": "d533c282-a5e3-404e-9810-c91dcd8adef9"
-}
-```
+  - `task_id`
 
-- `task_id` is required to start the SSE connection
-- The upload **continues in the background**
-
----
-
-### Duplicate Template Response
-
-**Status:** `409 Conflict`
-
-```json
-{
-  "message": "Duplicate template detected.",
-  "template_id": "66b5e9c4d2f9a19a3d8a21ab",
-  "file_name": "Agreement.pdf",
-  "file_url": "https://storage.azure.com/..."
-}
-```
-
-**Frontend behavior**
-
-- Do NOT open SSE
-- Show duplicate warning
-- Optionally redirect user to existing template
+👉 **Important:**
+This does **not** mean the template is ready.
+Frontend **must track status** using the task ID.
 
 ---
 
-## Server-Sent Events (SSE)
+### Duplicate Template Handling
 
-### SSE Endpoint
+If the same file is uploaded again:
 
-**GET**
+| Status       | Meaning                     |
+| ------------ | --------------------------- |
+| 409 Conflict | Duplicate template detected |
 
-```
-/api/v1/drafting/contract/template/upload/sse/{task_id}/
-```
+Response includes:
 
-**Headers**
+- Existing template ID
+- Existing file URL
 
-```
-Authorization: Bearer <JWT_TOKEN>
-Accept: text/event-stream
-```
+**Frontend UX Recommendation**
 
----
-
-### SSE Message Format
-
-Each SSE message contains JSON:
-
-```json
-{
-  "status": "processing",
-  "progress": 60,
-  "message": "Uploading file to storage"
-}
-```
+- Show warning: “This template already exists”
 
 ---
 
-### Possible `status` values
+## 2. Upload Status Tracking
 
-| Status     | Meaning                      |
-| ---------- | ---------------------------- |
-| started    | Task accepted                |
-| processing | Background work running      |
-| completed  | Upload finished successfully |
-| error      | Upload failed                |
+### Endpoint
 
----
+`GET /api/v1/drafting/contract/template/upload/status/{task_id}/`
 
-### Example Completion Event
+### Purpose
 
-```json
-{
-  "status": "completed",
-  "progress": 100,
-  "template_id": "66b5e9c4d2f9a19a3d8a21ab",
-  "file_url": "https://storage.azure.com/...",
-  "message": "Template uploaded successfully"
-}
-```
+Track the progress of an ongoing template upload.
+
+### When to Use
+
+- Immediately after upload starts
+- Poll every 2 seconds
 
 ---
 
-## Frontend Integration (React Example)
+### Task States
 
-```ts
-const eventSource = new EventSource(
-  `/api/v1/drafting/contract/template/upload/sse/${taskId}`,
-  {
-    withCredentials: true,
-  }
-);
-
-eventSource.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-
-  setProgress(data.progress);
-
-  if (data.status === "completed") {
-    eventSource.close();
-    /** Add your logic **/
-  }
-
-  if (data.status === "error") {
-    eventSource.close();
-    showError(data.message);
-  }
-};
-
-eventSource.onerror = () => {
-  eventSource.close();
-};
-```
+| State        | Meaning             | Frontend Action       |
+| ------------ | ------------------- | --------------------- |
+| `PENDING`    | Task queued         | Show loading          |
+| `STARTED`    | Processing started  | Show progress         |
+| `PROCESSING` | Uploading & parsing | Update progress bar   |
+| `SUCCESS`    | Upload completed    | Refresh template list |
+| `FAILED`     | Error occurred      | Show error message    |
 
 ---
 
-## Recommended UX Flow
+### Status Response Structure
 
-1. User uploads file
-2. Show progress modal (0–10%)
-3. Open SSE connection
-4. Update progress bar using `progress`
-5. Close modal on completion
-6. Redirect or refresh template list
+The response includes:
 
----
+- `task_id`
+- `state`
+- `meta` (varies by state)
 
-## Error Handling Guidelines
+#### Meta Object (Common Fields)
 
-### Duplicate (409)
+- `progress` (percentage)
+- `message` (human-readable status)
 
-- Do not retry
-- Inform user
-- Provide link to existing template
+#### On Success
 
-### SSE Error
+Meta may also include:
 
-- Close connection
+- Template ID
+- File URL
 
 ---
 
-## Important Notes
+### Frontend UX Recommendations
 
-### SSE Limitations
+Show a progress bar using `progress`
 
-- No request body
-- No bidirectional communication
-- One connection per task
+Display user-friendly messages from `meta.message`
 
-### Browser Support
+Stop polling once state is `SUCCESS` or `FAILED`
 
-- Supported in all modern browsers
-- Not supported in IE
+On success:
 
----
-
-## Debugging Tips (Frontend)
-
-- Use **Browser DevTools → Network → EventStream**
-- Avoid Postman for SSE (not supported well)
-- Prefer browser console or `curl -N`
+- Redirect to template list
+- Or auto-refresh list
 
 ---
 
-## Summary
+## Recommended Frontend Flow
 
-- Upload API is **non-blocking**
-- SSE provides **real-time progress**
-- Duplicate handling is **synchronous**
-- Frontend can safely ignore SSE if progress UI is not needed
-
----
-
-## FAQ
-
-### Do we need SSE?
-
-No. Upload works without SSE.
-SSE is recommended for better UX.
-
-### What if user refreshes page?
-
-- SSE connection closes
-- Upload continues in background
-- User can refresh template list later
+1. User fills template form
+2. User uploads file
+3. API returns `task_id`
+4. Frontend starts polling status API
+5. Show progress updates
+6. On success: Refresh template list
+7. On failure: Show error
 
 ---
