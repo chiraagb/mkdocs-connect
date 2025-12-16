@@ -1,160 +1,258 @@
-# Upload Template API
+# Template Upload with SSE - Included details required for frontend Integration
 
-## POST `/api/v1/drafting/contract/template/upload/`
+This document explains how the frontend should integrate with the **Template Upload API** that supports:
 
-Upload a template in PDF format to the system.
-The API performss:
-
-- Organization validation
-- Duplicate detection using **MD5 hash** + filename/size fallback
-- Gemini processing to extract HTML with variable placeholders
-- Upload to Azure Blob Storage
-- Save record in MongoDB
+- File upload
+- Duplicate detection
+- Background processing (Celery)
+- Real-time progress updates using **Server-Sent Events (SSE)**
 
 ---
 
-## Permissions
+## Overview
 
-| Requirement      | Value             |
-| ---------------- | ----------------- |
-| Authentication   | **Required**      |
-| Permission Class | `IsAuthenticated` |
+The upload flow works in **two phases**:
 
----
+1. **Upload API call**
 
-## Description
+   - Validates input
+   - Performs duplicate check
+   - Starts background processing
+   - Returns a `task_id`
 
-This endpoint allows an authenticated user to upload a contract template PDF.
-The system:
+2. **SSE connection (optional but recommended)**
+   - Streams real-time progress
+   - Automatically closes on completion or error
 
-1. Reads the file & computes MD5 hash
-2. Checks MongoDB for duplicate templates
-3. If duplicate → returns `409 CONFLICT`
-4. If new → sends the file to Gemini for HTML extraction
-5. Uploads the file to Azure Blob Storage
-6. Saves metadata + extracted HTML in MongoDB
-7. Returns template ID + HTML content + file URL
+> ⚠️ SSE is **read-only** and **one-way** (server → client).
 
 ---
 
-## Request
+## API Endpoints
 
-### **Headers**
+### Upload Template
 
-| Key           | Value                 |
-| ------------- | --------------------- |
-| Authorization | `Bearer <token>`      |
-| Content-Type  | `multipart/form-data` |
+**POST**
+
+```
+
+/api/v1/drafting/contract/template/upload/
+
+```
+
+**Headers**
+
+```
+
+Authorization: Bearer <JWT_TOKEN>
+
+```
+
+**Body (multipart/form-data)**
+
+| Field       | Type   | Required |
+| ----------- | ------ | -------- |
+| name        | string | ✅       |
+| type        | string | ✅       |
+| description | string | ❌       |
+| files       | file   | ✅       |
 
 ---
 
-### **Form Data Fields**
-
-| Field         | Type   | Required | Description                                         |
-| ------------- | ------ | -------- | --------------------------------------------------- |
-| `name`        | string | Yes      | Template name                                       |
-| `type`        | string | Yes      | Template type/category                              |
-| `description` | string | No       | Brief description                                   |
-| `files`       | file[] | Yes      | One or more PDF files (only the first is processed) |
-
----
-
-## Response (Success – 201)
+### Success Response (Non-blocking)
 
 ```json
 {
-  "message": "Template uploaded, processed, saved, and uploaded to Azure successfully.",
-  "template_id": "69291e28f5e5c1fd74b48165",
-  "html_content": "<h1>Sales Agreement</h1> ...",
-  "file_url": "https://aviaraconnectstorage.blob.core.windows.net/aviara-connect/drafting_templates/sales_contract.pdf"
+  "message": "Template upload started",
+  "task_id": "d533c282-a5e3-404e-9810-c91dcd8adef9"
 }
 ```
 
+- `task_id` is required to start the SSE connection
+- The upload **continues in the background**
+
 ---
 
-## Response (Duplicate – 409)
+### Duplicate Template Response
+
+**Status:** `409 Conflict`
 
 ```json
 {
   "message": "Duplicate template detected.",
-  "template_id": "69291e28f5e5c1fd74b48165",
-  "file_url": "https://.../drafting_templates/sales_contract.pdf"
+  "template_id": "66b5e9c4d2f9a19a3d8a21ab",
+  "file_name": "Agreement.pdf",
+  "file_url": "https://storage.azure.com/..."
+}
+```
+
+**Frontend behavior**
+
+- Do NOT open SSE
+- Show duplicate warning
+- Optionally redirect user to existing template
+
+---
+
+## Server-Sent Events (SSE)
+
+### SSE Endpoint
+
+**GET**
+
+```
+/api/v1/drafting/contract/template/upload/sse/{task_id}/
+```
+
+**Headers**
+
+```
+Authorization: Bearer <JWT_TOKEN>
+Accept: text/event-stream
+```
+
+---
+
+### SSE Message Format
+
+Each SSE message contains JSON:
+
+```json
+{
+  "status": "processing",
+  "progress": 60,
+  "message": "Uploading file to storage"
 }
 ```
 
 ---
 
-## Response (Validation Error – 400)
+### Possible `status` values
 
-```json
-{ "error": "No files were uploaded." }
-```
-
-OR
-
-```json
-{ "error": "User organization not found." }
-```
+| Status     | Meaning                      |
+| ---------- | ---------------------------- |
+| started    | Task accepted                |
+| processing | Background work running      |
+| completed  | Upload finished successfully |
+| error      | Upload failed                |
 
 ---
 
-## Response (Server Error – 500)
+### Example Completion Event
 
 ```json
-{ "error": "Failed to process file with Gemini API." }
-```
-
----
-
-## cURL Example
-
-```bash
-curl -X POST "https://your-domain.com/api/v1/drafting/contract/template/upload/" \
-  -H "Authorization: Bearer <TOKEN>" \
-  -F "name=Sales Agreement" \
-  -F "type=Sales/Purchase Agreement" \
-  -F "description=Testing upload" \
-  -F "files=@/path/to/sales_contract.pdf"
-```
-
----
-
-## Python Example (requests)
-
-```python
-import requests
-
-url = "https://your-domain.com/api/v1/drafting/contract/template/upload/"
-token = "<TOKEN>"
-
-files = {
-    "files": open("sales_contract.pdf", "rb")
+{
+  "status": "completed",
+  "progress": 100,
+  "template_id": "66b5e9c4d2f9a19a3d8a21ab",
+  "file_url": "https://storage.azure.com/...",
+  "message": "Template uploaded successfully"
 }
-data = {
-    "name": "Sales Agreement",
-    "type": "Sales/Purchase Agreement",
-    "description": "Testing upload"
-}
-
-resp = requests.post(
-    url,
-    headers={"Authorization": f"Bearer {token}"},
-    data=data,
-    files=files
-)
-
-print(resp.status_code)
-print(resp.json())
 ```
 
 ---
 
-## Notes
+## Frontend Integration (React Example)
 
-!!! info "Important Notes"
+```ts
+const eventSource = new EventSource(
+  `/api/v1/drafting/contract/template/upload/sse/${taskId}`,
+  {
+    withCredentials: true,
+  }
+);
 
-- Only the **first file** from `files[]` is processed.
-- Duplicate detection uses **MD5 hash**, then fallback to (filename + size).
-- File is uploaded to **Azure Blob Storage** under `drafting_templates/<filename>`.
-- The extracted HTML is generated by the Gemini API using a fixed **placeholder variable list**.
-- The actual MongoDB document structure depends on your database configuration.
+eventSource.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+
+  setProgress(data.progress);
+
+  if (data.status === "completed") {
+    eventSource.close();
+    /** Add your logic **/
+  }
+
+  if (data.status === "error") {
+    eventSource.close();
+    showError(data.message);
+  }
+};
+
+eventSource.onerror = () => {
+  eventSource.close();
+};
+```
+
+---
+
+## Recommended UX Flow
+
+1. User uploads file
+2. Show progress modal (0–10%)
+3. Open SSE connection
+4. Update progress bar using `progress`
+5. Close modal on completion
+6. Redirect or refresh template list
+
+---
+
+## Error Handling Guidelines
+
+### Duplicate (409)
+
+- Do not retry
+- Inform user
+- Provide link to existing template
+
+### SSE Error
+
+- Close connection
+
+---
+
+## Important Notes
+
+### SSE Limitations
+
+- No request body
+- No bidirectional communication
+- One connection per task
+
+### Browser Support
+
+- Supported in all modern browsers
+- Not supported in IE
+
+---
+
+## Debugging Tips (Frontend)
+
+- Use **Browser DevTools → Network → EventStream**
+- Avoid Postman for SSE (not supported well)
+- Prefer browser console or `curl -N`
+
+---
+
+## Summary
+
+- Upload API is **non-blocking**
+- SSE provides **real-time progress**
+- Duplicate handling is **synchronous**
+- Frontend can safely ignore SSE if progress UI is not needed
+
+---
+
+## FAQ
+
+### Do we need SSE?
+
+No. Upload works without SSE.
+SSE is recommended for better UX.
+
+### What if user refreshes page?
+
+- SSE connection closes
+- Upload continues in background
+- User can refresh template list later
+
+---
